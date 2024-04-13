@@ -1,0 +1,128 @@
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.layers import LSTM, Dropout, Dense
+from sklearn.preprocessing import MinMaxScaler
+import paho.mqtt.client as mqtt
+import json
+import time
+
+# Membaca file data pelatihan
+df_train = pd.read_csv('/home/admin/RProject/data_normalisasi/Dataset-Week1OK.csv')
+
+# Mengambil input (TP, S-TV, S-WPM, T, Pb, Pg, NSM, WS, HR) dan output (S-AC)
+X_train = df_train[['TP', 'S-TV', 'S-WPM', 'T', 'Pb', 'Pg', 'NSM', 'WS', 'HR']].values
+y_train = df_train['S-AC'].values
+
+# Membuat scaler dengan feature_range=(-1, 1) dan fitting dengan data pelatihan
+scalerX_predict = MinMaxScaler(feature_range=(-1, 1))
+scalerX_predict.fit(X_train)
+
+scalery_predict = MinMaxScaler(feature_range=(-1, 1))
+scalery_predict.fit(y_train.reshape(-1, 1))
+
+# Memuat model yang telah disimpan
+loaded_model = tf.keras.models.load_model('/home/admin/RProject/model/lstm-ACmodel_savedmodel')
+
+# Fungsi callback saat menerima pesan MQTT
+def on_message(client, userdata, msg):
+    try:
+        # Mendekode data JSON dari pesan MQTT
+        ac_parameters = json.loads(msg.payload.decode('utf-8'))
+
+        # Menampilkan parameter AC
+        #print("Received Parameter AC:", ac_parameters)
+
+        # Mengirim parameter AC ke fungsi prediksi
+        predict_with_mqtt(ac_parameters)
+    except Exception as e:
+        print("Error handling MQTT message:", e)
+
+# Konfigurasi broker MQTT
+broker_address = "113.212.117.247"
+broker_port = 1883
+
+# Inisialisasi client MQTT
+client = mqtt.Client()
+client.on_message = on_message
+
+# Menghubungkan ke broker MQTT
+client.connect(broker_address, broker_port, 60)
+
+# Berlangganan ke topik MQTT
+client.subscribe("/ml/lstm/parameterac")
+
+# Menjalankan loop MQTT
+client.loop_start()
+
+# Fungsi untuk melakukan prediksi dengan data sensor real-time
+def predict_with_mqtt(ac_parameters):
+    #print("Received sensor data:")
+    #print(ac_parameters)
+
+    # Praproses data sensor
+    X_sensor = pd.DataFrame(ac_parameters, index=[0], columns=['TP', 'S-TV', 'S-WPM', 'T', 'Pb', 'Pg', 'NSM', 'WS', 'HR'])
+
+    # Menampilkan nilai X_sensor sebelum scaling
+    #print("Original X_sensor:")
+    #print(X_sensor)
+
+    # Transformasi data menggunakan scaler yang sesuai
+    try:
+        X_sensor_scaled = scalerX_predict.transform(X_sensor)
+        
+        # Menampilkan nilai X_sensor setelah scaling
+        # print("Scaled X_sensor:")
+        # print(X_sensor_scaled)
+
+    except Exception as e:
+        print("Error scaling the sensor data:", e)
+        return
+
+    # Melakukan prediksi dengan model yang telah di-load
+    try:
+        y_pred_scaled = loaded_model.predict(X_sensor_scaled)
+    except Exception as e:
+        print("Error predicting with the loaded model:", e)
+        return
+        
+    # Mengembalikan hasil prediksi ke skala asli
+    try:
+        y_pred = scalery_predict.inverse_transform(y_pred_scaled)
+    except Exception as e:
+        print("Error in inverse_transform:", e)
+        return
+
+    # Menampilkan hasil prediksi
+    #print("Predicted results:")
+    #print("Prediction Value:", y_pred[0, 0])
+
+    # Menentukan ambang batas (threshold)
+    threshold = 0.5
+
+    # Menentukan status AC berdasarkan hasil prediksi
+    ac_status_binary = 1 if y_pred[0, 0] > threshold else 0
+    ac_status = "ON" if ac_status_binary else "OFF"
+    #print("Start")
+    #print("AC Status:", ac_status)
+    print(ac_status)
+
+    # Mengirim hasil prediksi dan status AC melalui MQTT
+    #result_data = {
+        #'prediction': float(y_pred[0, 0]),
+        #'ac_status_binary': ac_status_binary,
+        #'ac_status': ac_status
+    #}
+    #result_data = "Start"
+    result_data = ac_status
+    # Pastikan client berasal dari lingkup global atau tambahkan sebagai parameter jika diperlukan
+    client.publish("/ml/lstm/prediksiac", json.dumps(result_data))
+
+try:
+    while True:
+        # Tunggu selama satu menit
+        time.sleep(60)
+except KeyboardInterrupt:
+    # Tangani interrupt dari keyboard (Ctrl+C)
+    print("Program dihentikan secara manual.")
+    client.disconnect()
+    client.loop_stop()

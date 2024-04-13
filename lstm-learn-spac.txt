@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Dense, Concatenate
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+import json
+
+# Normalisasi Data
+file_path = '/home/admin/RProject/dataset/Dataset-Week1.csv'
+df = pd.read_csv(file_path) 
+
+# Biarkan pandas mencoba menentukan format tanggal dan waktu secara otomatis
+df['TS'] = pd.to_datetime(df['TS'], errors='coerce')
+
+df['NSM'] = df['TS'].dt.hour * 3600 + df['TS'].dt.minute * 60 + df['TS'].dt.second
+df['WS'] = df['TS'].dt.dayofweek // 5
+df['D'] = df['TS'].dt.dayofweek + 1
+
+df['NSM'] = df['NSM'] / (24 * 3600)
+df['TP'] = df['TP'] / 1200
+df['T'] = (df['T'] + 20) / 70
+df['H'] = (df['H'] - 20) / 60
+df['Pb'] = df['Pb'] 
+df['Pg'] = df['Pg']
+df['S-AC'] = df['S-AC']
+
+df['HR'] = (df['TS'].dt.month + df['TS'].dt.day + df['TS'].dt.year) / (12 + 31 + 9999)
+df['WK'] = (df['TS'].dt.hour * 3600 + df['TS'].dt.minute * 60 + df['TS'].dt.second) / (24 * 3600)
+
+df['TS'] = (df['TS'] - df['TS'].min()) / (df['TS'].max() - df['TS'].min())
+
+# Hanya menyimpan kolom yang dibutuhkan
+selected_columns = ['TP', 'S-AC', 'S-TV', 'S-WPM', 'T', 'Pb', 'Pg', 'NSM', 'WS', 'HR']
+df_selected = df[selected_columns]
+
+# Simpan Data yang Telah Dimodifikasi ke File CSV
+csv_output_path = '/home/admin/RProject/data_normalisasi/Dataset-Week1OK.csv'
+df_selected.to_csv(csv_output_path, index=False)
+
+# Tampilkan beberapa baris data setelah dimodifikasi
+print("Data setelah dimodifikasi:")
+print(df_selected.head())
+
+# Fungsi aktivasi sigmoid dan tanh
+def sigmoid(x):
+    return 1 / (1 + tf.exp(-x))
+
+def tanh(x):
+    return tf.math.tanh(x)
+
+# Membaca file csv yang sudah di normalisasi
+df_train = pd.read_csv('/home/admin/RProject/data_normalisasi/Dataset-Week1OK.csv')
+
+# Drop rows with NaN values
+df_train.dropna(inplace=True)
+
+# Mengambil input (TP, P, WS, WK, HR) dan output (S-AC)
+X_train = df_train[['TP', 'S-TV', 'S-WPM', 'T', 'Pb', 'Pg', 'NSM', 'WS', 'HR']].values
+y_train = df_train['S-AC'].values
+
+# Menggunakan scaler untuk mengubah skala input dan output
+scalerX_train = MinMaxScaler(feature_range=(-1, 1))
+scalerX_train.fit(X_train)
+X_train = scalerX_train.transform(X_train)
+
+scalery_train = MinMaxScaler(feature_range=(-1, 1))
+scalery_train.fit(y_train.reshape(-1, 1))
+y_train = scalery_train.transform(y_train.reshape(-1, 1))
+
+# Membagi data menjadi training, validasi, dan uji
+X_train, X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=42)
+
+# Membuat model LSTM
+model = Sequential()
+model.add(LSTM(units=25, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+model.add(Dropout(0.1))
+model.add(LSTM(units=25))
+model.add(Dropout(0.1))
+model.add(Dense(units=1))
+
+# Mengoptimasi model menggunakan Adam dan menjalankan early stopping
+model.compile(optimizer=Adam(learning_rate=0.0001), loss='mean_squared_error')
+early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+# Melatih model menggunakan 60% data training, 20% data validasi, dan threshold 0.0001
+model.fit(X_train, y_train, epochs=130, batch_size=16, validation_data=(X_val, y_val), callbacks=[early_stopping], verbose=1)
+
+# Mengonversi parameter scaler ke format JSON
+scalerX_train_params = {
+    'scale_': scalerX_train.scale_.tolist(),
+    'data_min_': scalerX_train.data_min_.tolist(),
+    'data_max_': scalerX_train.data_max_.tolist(),
+    'data_range_': scalerX_train.data_range_.tolist(),
+    'min_': scalerX_train.min_.tolist(),
+    # Hilangkan 'n_samples_seen_' dari dictionary
+}
+
+# Menyimpan parameter scaler ke dalam file JSON
+scalerX_train_json_path = '/home/admin/scalerX_train_ac.json'
+with open(scalerX_train_json_path, 'w') as json_file:
+    json.dump(scalerX_train_params, json_file)
+
+
+# Menampilkan pesan bahwa scalerX_train.json telah disimpan
+print("Scaler parameters saved to:", scalerX_train_json_path)
+
+# Menyimpan Model LSTM dalam format SavedModel
+model.save('/home/admin/RProject/model/lstm-ACmodel_savedmodel')
+print("Model LSTM berhasil disimpan dalam format SavedModel.")
+
+# Muat kembali model yang telah disimpan
+loaded_model = tf.keras.models.load_model('/home/admin/RProject/model/lstm-ACmodel_savedmodel')
+
+# Kompilasi model
+loaded_model.compile(optimizer=Adam(learning_rate=0.0001), loss='mean_squared_error')
+
+# Membaca file csv untuk prediksi
+df_pred = pd.read_csv('/home/admin/RProject/dataset/Dataset-Week1OK.csv')
+
+# Mengambil input (TP, P, WS, WK, HR) untuk prediksi
+X_pred = df_pred[['TP', 'S-TV', 'S-WPM', 'T', 'Pb', 'Pg', 'NSM', 'WS', 'HR']].values
+
+# Menggunakan scaler yang sama untuk mengubah skala input
+X_pred_scaled = scalerX_train.transform(X_pred)
+
+# Menyesuaikan dimensi input untuk model LSTM
+X_pred_scaled = X_pred_scaled.reshape((X_pred_scaled.shape[0], X_pred_scaled.shape[1], 1))
+
+# Melakukan prediksi
+y_pred_scaled = loaded_model.predict(X_pred_scaled)
+
+# Menggunakan scaler untuk mengembalikan hasil prediksi ke skala asli
+y_pred = scalery_train.inverse_transform(y_pred_scaled)
+
+# Menambahkan hasil prediksi ke dataframe
+df_pred['S-AC_Pred'] = y_pred
+
+# Menetapkan nilai ambang
+threshold = 0.5
+
+# Mengganti nilai prediksi dengan 1 jika lebih besar dari ambang, dan 0 jika sebaliknya
+df_pred['S-AC_Pred_Binary'] = (df_pred['S-AC_Pred'] > threshold).astype(int)
+
+# Menyimpan hasil prediksi biner ke file CSV
+csv_output_path_pred_binary = '/home/admin/RProject/PredictAC_binary.csv'
+df_pred.to_csv(csv_output_path_pred_binary, index=False)
+
+# Menampilkan beberapa baris hasil prediksi biner
+print("Hasil prediksi biner:")
+print(df_pred.head())
+
+# Menghapus baris yang mengandung nilai NaN dari dataframe
+df_pred.dropna(inplace=True)
+
+# Menampilkan jumlah nilai NaN setelah penghapusan
+print("Jumlah nilai NaN di kolom 'S-AC':", df_pred['S-AC'].isna().sum())
+print("Jumlah nilai NaN di kolom 'S-AC_Pred':", df_pred['S-AC_Pred'].isna().sum())
+
+from sklearn.metrics import mean_squared_error, accuracy_score, precision_score
+import numpy as np
+
+# Menghitung Mean Squared Error (MSE)
+mse = mean_squared_error(df_pred['S-AC'], df_pred['S-AC_Pred'])
+
+# Menghitung Root Mean Squared Error (RMSE)
+rmse = np.sqrt(mse)
+
+# Menghitung akurasi
+accuracy = accuracy_score(df_pred['S-AC'], df_pred['S-AC_Pred_Binary'])
+
+# Menghitung akurasi dalam persen
+#accuracy_percent = accuracy * 100
+
+# Menghitung presisi
+precision = precision_score(df_pred['S-AC'], df_pred['S-AC_Pred_Binary'])
+
+# Menampilkan hasil
+print("Performance Metrics:")
+print("Accuracy:", accuracy)
+#print("Accuracy (%):", accuracy_percent, "%")
+print("Precision:", precision)
+print("MSE:", mse)
+print("RMSE:", rmse)
+
+
